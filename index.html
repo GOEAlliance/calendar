@@ -36,11 +36,10 @@
 
   <script>
     // ====== CONFIG ======
-    const API_URL = "https://script.google.com/macros/s/AKfycbzW9uHznErbCPxJpFdBpy9eXmjULanZN01g03YxxuC9qQ7V0Y4___GWeX3wu8OVl1eE2A/exec";   // ví dụ: https://script.google.com/macros/s/XXX/exec
-    const API_KEY = "fam90u8932";
-    const REFRESH_MS = 10000; // 10s
+    const API_URL = "https://script.google.com/macros/s/AKfycbxlgVqfWnsS-I4CUVAi2osAruRha-P3zhQoZRJoA6rO8HcJPc4Q3DUhOfZtmgjwQFvDmQ/exec";
+    const API_KEY = "fam90u8932"; // đổi nếu backend bạn đổi key
+    const REFRESH_MS = 10000;
 
-    const TZ = "Asia/Ho_Chi_Minh";
     const root = document.getElementById("root");
     const statusEl = document.getElementById("status");
     const qEl = document.getElementById("q");
@@ -49,25 +48,56 @@
     let itemsAll = [];
     let lastHash = "";
 
-    // ====== FORMATTERS ======
-    const fmtDate = (d) =>
-      new Intl.DateTimeFormat("vi-VN", { timeZone: TZ, weekday: "long", year: "numeric", month: "2-digit", day: "2-digit" }).format(d);
+    function pad2(n){ return String(n).padStart(2, "0"); }
 
-    const fmtDateShort = (d) =>
-      new Intl.DateTimeFormat("vi-VN", { timeZone: TZ, year: "numeric", month: "2-digit", day: "2-digit" }).format(d);
+    // ====== FIX: Parse CHUẨN DMY (DD/MM/YYYY hh:mm AM|PM) ======
+    // Example: 13/03/2026 04:00 PM  => day=13, month=03
+    function parseMeetingTime(str) {
+      if (!str) return new Date(NaN);
+      const s = String(str).trim();
 
-    const fmtTime = (d) =>
-      new Intl.DateTimeFormat("vi-VN", { timeZone: TZ, hour: "2-digit", minute: "2-digit" }).format(d);
+      const m = s.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})\s+(\d{1,2}):(\d{2})\s*(AM|PM)$/i);
+      if (!m) return new Date(s); // fallback (ISO, etc.)
 
-    const dayKey = (d) => {
-      const parts = new Intl.DateTimeFormat("en-CA", { timeZone: TZ, year: "numeric", month: "2-digit", day: "2-digit" }).formatToParts(d);
-      const y = parts.find(p=>p.type==="year").value;
-      const m = parts.find(p=>p.type==="month").value;
-      const da = parts.find(p=>p.type==="day").value;
-      return `${y}-${m}-${da}`;
-    };
+      let [, dd, mm, yyyy, hh, mi, ap] = m;
 
-    // ====== UTIL ======
+      const day = parseInt(dd, 10);          // ✅ DD
+      const month = parseInt(mm, 10);        // ✅ MM
+      const year = parseInt(yyyy, 10);
+
+      let hour = parseInt(hh, 10);
+      const minute = parseInt(mi, 10);
+
+      ap = ap.toUpperCase();
+      if (ap === "PM" && hour !== 12) hour += 12;
+      if (ap === "AM" && hour === 12) hour = 0;
+
+      // month-1 vì JS month 0-based
+      return new Date(year, month - 1, day, hour, minute);
+    }
+
+    // ====== Format đúng dd/mm/yyyy ======
+    function formatDateDDMMYYYY(d){
+      return `${pad2(d.getDate())}/${pad2(d.getMonth()+1)}/${d.getFullYear()}`;
+    }
+
+    // Output đúng template dd/mm/yyyy hh:mm AM/PM
+    function formatMeetingTimeTemplate(d){
+      let hour = d.getHours();
+      const ap = hour >= 12 ? "PM" : "AM";
+      hour = hour % 12;
+      if (hour === 0) hour = 12;
+
+      const hh = pad2(hour);
+      const mi = pad2(d.getMinutes());
+      return `${formatDateDDMMYYYY(d)} ${hh}:${mi} ${ap}`;
+    }
+
+    // group key nội bộ
+    function dayKey(d){
+      return `${d.getFullYear()}-${pad2(d.getMonth()+1)}-${pad2(d.getDate())}`;
+    }
+
     function escapeHtml(s) {
       return String(s ?? "")
         .replaceAll("&","&amp;").replaceAll("<","&lt;").replaceAll(">","&gt;")
@@ -81,36 +111,10 @@
       return `<a href="${safe}" target="_blank" rel="noopener noreferrer">${label}</a>`;
     }
 
-    // Parse "14-03-2026 01:30 PM" (DD-MM-YYYY hh:mm AM/PM)
-    // Also falls back to native Date parsing for ISO etc.
-    function parseMeetingTime(str) {
-      if (!str) return new Date(NaN);
-
-      const s = String(str).trim();
-
-      // DD-MM-YYYY HH:MM AM/PM  (allow 1-2 digit hour)
-      const m = s.match(/^(\d{2})-(\d{2})-(\d{4})\s+(\d{1,2}):(\d{2})\s*(AM|PM)$/i);
-      if (m) {
-        let [, day, month, year, hour, minute, ampm] = m;
-        day = parseInt(day, 10);
-        month = parseInt(month, 10) - 1;
-        year = parseInt(year, 10);
-        hour = parseInt(hour, 10);
-        minute = parseInt(minute, 10);
-        ampm = ampm.toUpperCase();
-        if (ampm === "PM" && hour !== 12) hour += 12;
-        if (ampm === "AM" && hour === 12) hour = 0;
-        return new Date(year, month, day, hour, minute);
-      }
-
-      // fallback (ISO / RFC / etc.)
-      return new Date(s);
-    }
-
     function groupByDay(items) {
       const parsed = items
         .map(it => {
-          const d = parseMeetingTime(it.meetingTime);
+          const d = parseMeetingTime(it.meetingTime); // ✅ dùng parser DMY
           return { ...it, _date: d, _dayKey: dayKey(d) };
         })
         .filter(it => !isNaN(it._date.getTime()));
@@ -125,7 +129,6 @@
       return map;
     }
 
-    // ====== RENDER ======
     function render(items) {
       const groups = groupByDay(items);
 
@@ -139,20 +142,21 @@
         const day = document.createElement("div");
         day.className = "day";
 
+        // tiêu đề theo dd/mm/yyyy
         const h2 = document.createElement("h2");
-        h2.textContent = fmtDate(dayItems[0]._date);
+        h2.textContent = formatDateDDMMYYYY(dayItems[0]._date);
         day.appendChild(h2);
 
         const table = document.createElement("table");
         table.innerHTML = `
           <thead>
             <tr>
-              <th style="width: 12%;">Meeting Time</th>
+              <th style="width: 22%;">Meeting Time</th>
               <th style="width: 14%;">Ngày</th>
               <th style="width: 24%;">Summary</th>
               <th style="width: 18%;">Người đặt lịch</th>
-              <th style="width: 16%;">Meeting Link</th>
-              <th style="width: 16%;">Manage Link</th>
+              <th style="width: 11%;">Meeting Link</th>
+              <th style="width: 11%;">Manage Link</th>
             </tr>
           </thead>
           <tbody></tbody>
@@ -161,9 +165,15 @@
 
         for (const it of dayItems) {
           const tr = document.createElement("tr");
+
+          // Hiển thị y chang string từ sheet (nếu có),
+          // nhưng nếu string thiếu/khác format thì normalize theo template dd/mm/yyyy hh:mm AM/PM
+          const raw = String(it.meetingTime || "").trim();
+          const meetingTimeText = raw ? raw : formatMeetingTimeTemplate(it._date);
+
           tr.innerHTML = `
-            <td>${fmtTime(it._date)}</td>
-            <td>${fmtDateShort(it._date)}</td>
+            <td>${escapeHtml(meetingTimeText)}</td>
+            <td>${escapeHtml(formatDateDDMMYYYY(it._date))}</td>
             <td class="wrap">${escapeHtml(it.summary)}</td>
             <td class="wrap">${escapeHtml(it.booker)}</td>
             <td class="wrap">${linkCell(it.meetingLink, "Open")}</td>
@@ -177,7 +187,6 @@
       }
     }
 
-    // ====== SEARCH ======
     function applyFilter() {
       const q = (qEl.value || "").trim().toLowerCase();
       if (!q) return render(itemsAll);
@@ -192,7 +201,6 @@
     qEl.addEventListener("input", applyFilter);
     resetEl.addEventListener("click", () => { qEl.value = ""; render(itemsAll); });
 
-    // ====== FETCH ======
     function hashItems(items) { return JSON.stringify(items); }
 
     async function fetchItems() {
@@ -209,6 +217,7 @@
         statusEl.textContent = "Đang cập nhật...";
         const items = await fetchItems();
         const h = hashItems(items);
+
         if (h !== lastHash) {
           lastHash = h;
           itemsAll = items;
