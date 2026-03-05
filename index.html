@@ -1,0 +1,230 @@
+<!doctype html>
+<html lang="vi">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Meeting Calendar</title>
+  <style>
+    body { font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial; margin: 24px; }
+    .day { margin: 18px 0 28px; }
+    .day h2 { margin: 0 0 10px; font-size: 18px; }
+    table { width: 100%; border-collapse: collapse; border: 1px solid #ddd; border-radius: 10px; overflow: hidden; }
+    th, td { padding: 10px; border-bottom: 1px solid #eee; vertical-align: top; }
+    th { text-align: left; background: #fafafa; position: sticky; top: 0; }
+    a { text-decoration: none; }
+    a:hover { text-decoration: underline; }
+    .muted { color: #666; font-size: 13px; }
+    .wrap { word-break: break-word; }
+    .chip { display:inline-block; padding:2px 8px; border:1px solid #e5e5e5; border-radius:999px; font-size:12px; color:#444; background:#fff; }
+    .toolbar { display:flex; gap:10px; align-items:center; margin: 10px 0 18px; flex-wrap:wrap; }
+    input { padding:10px 12px; border:1px solid #ddd; border-radius:10px; min-width: 260px; }
+    button { padding:10px 12px; border:1px solid #ddd; border-radius:10px; background:#fff; cursor:pointer; }
+    button:hover { background:#f7f7f7; }
+  </style>
+</head>
+<body>
+  <h1>Meeting Calendar</h1>
+  <div class="toolbar">
+    <span class="chip">Grouped by day</span>
+    <span class="chip">Auto refresh</span>
+    <input id="q" placeholder="Tìm: summary / người đặt / link..." />
+    <button id="reset">Reset</button>
+    <span class="muted" id="status"></span>
+  </div>
+
+  <div id="root">Đang tải...</div>
+
+  <script>
+    // ====== CONFIG ======
+    const API_URL = "https://script.google.com/macros/s/AKfycbzz7-4sWlqPhQey4n21JOGsFi9FYjFbEWOAlI-WjzMprvXWVx-N29H83XpKAMsdiMBuBQ/exec";   // ví dụ: https://script.google.com/macros/s/XXX/exec
+    const API_KEY = "fam90u8932";
+    const REFRESH_MS = 10000; // 10s
+
+    const TZ = "Asia/Ho_Chi_Minh";
+    const root = document.getElementById("root");
+    const statusEl = document.getElementById("status");
+    const qEl = document.getElementById("q");
+    const resetEl = document.getElementById("reset");
+
+    let itemsAll = [];
+    let lastHash = "";
+
+    // ====== FORMATTERS ======
+    const fmtDate = (d) =>
+      new Intl.DateTimeFormat("vi-VN", { timeZone: TZ, weekday: "long", year: "numeric", month: "2-digit", day: "2-digit" }).format(d);
+
+    const fmtDateShort = (d) =>
+      new Intl.DateTimeFormat("vi-VN", { timeZone: TZ, year: "numeric", month: "2-digit", day: "2-digit" }).format(d);
+
+    const fmtTime = (d) =>
+      new Intl.DateTimeFormat("vi-VN", { timeZone: TZ, hour: "2-digit", minute: "2-digit" }).format(d);
+
+    const dayKey = (d) => {
+      const parts = new Intl.DateTimeFormat("en-CA", { timeZone: TZ, year: "numeric", month: "2-digit", day: "2-digit" }).formatToParts(d);
+      const y = parts.find(p=>p.type==="year").value;
+      const m = parts.find(p=>p.type==="month").value;
+      const da = parts.find(p=>p.type==="day").value;
+      return `${y}-${m}-${da}`;
+    };
+
+    // ====== UTIL ======
+    function escapeHtml(s) {
+      return String(s ?? "")
+        .replaceAll("&","&amp;").replaceAll("<","&lt;").replaceAll(">","&gt;")
+        .replaceAll('"',"&quot;").replaceAll("'","&#039;");
+    }
+
+    function linkCell(url, label) {
+      const u = (url || "").trim();
+      if (!u) return "";
+      const safe = escapeHtml(u);
+      return `<a href="${safe}" target="_blank" rel="noopener noreferrer">${label}</a>`;
+    }
+
+    // Parse "14-03-2026 01:30 PM" (DD-MM-YYYY hh:mm AM/PM)
+    // Also falls back to native Date parsing for ISO etc.
+    function parseMeetingTime(str) {
+      if (!str) return new Date(NaN);
+
+      const s = String(str).trim();
+
+      // DD-MM-YYYY HH:MM AM/PM  (allow 1-2 digit hour)
+      const m = s.match(/^(\d{2})-(\d{2})-(\d{4})\s+(\d{1,2}):(\d{2})\s*(AM|PM)$/i);
+      if (m) {
+        let [, day, month, year, hour, minute, ampm] = m;
+        day = parseInt(day, 10);
+        month = parseInt(month, 10) - 1;
+        year = parseInt(year, 10);
+        hour = parseInt(hour, 10);
+        minute = parseInt(minute, 10);
+        ampm = ampm.toUpperCase();
+        if (ampm === "PM" && hour !== 12) hour += 12;
+        if (ampm === "AM" && hour === 12) hour = 0;
+        return new Date(year, month, day, hour, minute);
+      }
+
+      // fallback (ISO / RFC / etc.)
+      return new Date(s);
+    }
+
+    function groupByDay(items) {
+      const parsed = items
+        .map(it => {
+          const d = parseMeetingTime(it.meetingTime);
+          return { ...it, _date: d, _dayKey: dayKey(d) };
+        })
+        .filter(it => !isNaN(it._date.getTime()));
+
+      parsed.sort((a,b) => a._date - b._date);
+
+      const map = new Map();
+      for (const it of parsed) {
+        if (!map.has(it._dayKey)) map.set(it._dayKey, []);
+        map.get(it._dayKey).push(it);
+      }
+      return map;
+    }
+
+    // ====== RENDER ======
+    function render(items) {
+      const groups = groupByDay(items);
+
+      if (!groups || groups.size === 0) {
+        root.textContent = "Không có dữ liệu.";
+        return;
+      }
+
+      root.innerHTML = "";
+      for (const [k, dayItems] of groups.entries()) {
+        const day = document.createElement("div");
+        day.className = "day";
+
+        const h2 = document.createElement("h2");
+        h2.textContent = fmtDate(dayItems[0]._date);
+        day.appendChild(h2);
+
+        const table = document.createElement("table");
+        table.innerHTML = `
+          <thead>
+            <tr>
+              <th style="width: 12%;">Meeting Time</th>
+              <th style="width: 14%;">Ngày</th>
+              <th style="width: 24%;">Summary</th>
+              <th style="width: 18%;">Người đặt lịch</th>
+              <th style="width: 16%;">Meeting Link</th>
+              <th style="width: 16%;">Manage Link</th>
+            </tr>
+          </thead>
+          <tbody></tbody>
+        `;
+        const tbody = table.querySelector("tbody");
+
+        for (const it of dayItems) {
+          const tr = document.createElement("tr");
+          tr.innerHTML = `
+            <td>${fmtTime(it._date)}</td>
+            <td>${fmtDateShort(it._date)}</td>
+            <td class="wrap">${escapeHtml(it.summary)}</td>
+            <td class="wrap">${escapeHtml(it.booker)}</td>
+            <td class="wrap">${linkCell(it.meetingLink, "Open")}</td>
+            <td class="wrap">${linkCell(it.manageLink, "Manage")}</td>
+          `;
+          tbody.appendChild(tr);
+        }
+
+        day.appendChild(table);
+        root.appendChild(day);
+      }
+    }
+
+    // ====== SEARCH ======
+    function applyFilter() {
+      const q = (qEl.value || "").trim().toLowerCase();
+      if (!q) return render(itemsAll);
+
+      const filtered = itemsAll.filter(it => {
+        const blob = `${it.summary} ${it.booker} ${it.meetingLink} ${it.manageLink} ${it.meetingTime}`.toLowerCase();
+        return blob.includes(q);
+      });
+      render(filtered);
+    }
+
+    qEl.addEventListener("input", applyFilter);
+    resetEl.addEventListener("click", () => { qEl.value = ""; render(itemsAll); });
+
+    // ====== FETCH ======
+    function hashItems(items) { return JSON.stringify(items); }
+
+    async function fetchItems() {
+      const url = `${API_URL}?key=${encodeURIComponent(API_KEY)}`;
+      const res = await fetch(url, { cache: "no-store" });
+      if (!res.ok) throw new Error("HTTP " + res.status);
+      const data = await res.json();
+      if (data.error) throw new Error(data.error);
+      return data.items || [];
+    }
+
+    async function tick() {
+      try {
+        statusEl.textContent = "Đang cập nhật...";
+        const items = await fetchItems();
+        const h = hashItems(items);
+        if (h !== lastHash) {
+          lastHash = h;
+          itemsAll = items;
+          applyFilter();
+          statusEl.textContent = "Đã cập nhật ✓";
+        } else {
+          statusEl.textContent = "Không đổi";
+        }
+      } catch (e) {
+        statusEl.textContent = "Lỗi";
+        root.textContent = "Lỗi tải dữ liệu: " + e.message;
+      }
+    }
+
+    tick();
+    setInterval(tick, REFRESH_MS);
+  </script>
+</body>
+</html>
