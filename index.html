@@ -29,6 +29,7 @@
     <span class="chip">Auto refresh</span>
     <input id="q" placeholder="Tìm: summary / người đặt / link..." />
     <button id="reset">Reset</button>
+    <button id="togglePast">Xem lịch cũ</button>
     <span class="muted" id="status"></span>
   </div>
 
@@ -37,32 +38,33 @@
   <script>
     // ====== CONFIG ======
     const API_URL = "https://script.google.com/macros/s/AKfycbxlgVqfWnsS-I4CUVAi2osAruRha-P3zhQoZRJoA6rO8HcJPc4Q3DUhOfZtmgjwQFvDmQ/exec";
-    const API_KEY = "fam90u8932"; // đổi nếu backend bạn đổi key
+    const API_KEY = "fam90u8932";
     const REFRESH_MS = 10000;
 
     const root = document.getElementById("root");
     const statusEl = document.getElementById("status");
     const qEl = document.getElementById("q");
     const resetEl = document.getElementById("reset");
+    const togglePastEl = document.getElementById("togglePast");
 
     let itemsAll = [];
     let lastHash = "";
+    let showPast = false; // mặc định ẩn lịch cũ
 
     function pad2(n){ return String(n).padStart(2, "0"); }
 
-    // ====== FIX: Parse CHUẨN DMY (DD/MM/YYYY hh:mm AM|PM) ======
-    // Example: 13/03/2026 04:00 PM  => day=13, month=03
+    // ====== Parse CHUẨN DMY (DD/MM/YYYY hh:mm AM|PM) ======
     function parseMeetingTime(str) {
       if (!str) return new Date(NaN);
       const s = String(str).trim();
 
       const m = s.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})\s+(\d{1,2}):(\d{2})\s*(AM|PM)$/i);
-      if (!m) return new Date(s); // fallback (ISO, etc.)
+      if (!m) return new Date(s);
 
       let [, dd, mm, yyyy, hh, mi, ap] = m;
 
-      const day = parseInt(dd, 10);          // ✅ DD
-      const month = parseInt(mm, 10);        // ✅ MM
+      const day = parseInt(dd, 10);
+      const month = parseInt(mm, 10);
       const year = parseInt(yyyy, 10);
 
       let hour = parseInt(hh, 10);
@@ -72,16 +74,13 @@
       if (ap === "PM" && hour !== 12) hour += 12;
       if (ap === "AM" && hour === 12) hour = 0;
 
-      // month-1 vì JS month 0-based
       return new Date(year, month - 1, day, hour, minute);
     }
 
-    // ====== Format đúng dd/mm/yyyy ======
     function formatDateDDMMYYYY(d){
       return `${pad2(d.getDate())}/${pad2(d.getMonth()+1)}/${d.getFullYear()}`;
     }
 
-    // Output đúng template dd/mm/yyyy hh:mm AM/PM
     function formatMeetingTimeTemplate(d){
       let hour = d.getHours();
       const ap = hour >= 12 ? "PM" : "AM";
@@ -93,9 +92,19 @@
       return `${formatDateDDMMYYYY(d)} ${hh}:${mi} ${ap}`;
     }
 
-    // group key nội bộ
     function dayKey(d){
       return `${d.getFullYear()}-${pad2(d.getMonth()+1)}-${pad2(d.getDate())}`;
+    }
+
+    function startOfToday() {
+      const now = new Date();
+      return new Date(now.getFullYear(), now.getMonth(), now.getDate(), 0, 0, 0, 0);
+    }
+
+    function isPastItem(it) {
+      const d = parseMeetingTime(it.meetingTime);
+      if (isNaN(d.getTime())) return false;
+      return d < startOfToday();
     }
 
     function escapeHtml(s) {
@@ -114,7 +123,7 @@
     function groupByDay(items) {
       const parsed = items
         .map(it => {
-          const d = parseMeetingTime(it.meetingTime); // ✅ dùng parser DMY
+          const d = parseMeetingTime(it.meetingTime);
           return { ...it, _date: d, _dayKey: dayKey(d) };
         })
         .filter(it => !isNaN(it._date.getTime()));
@@ -129,11 +138,31 @@
       return map;
     }
 
+    function getDisplayItems() {
+      let items = [...itemsAll];
+
+      if (!showPast) {
+        items = items.filter(it => !isPastItem(it));
+      }
+
+      const q = (qEl.value || "").trim().toLowerCase();
+      if (q) {
+        items = items.filter(it => {
+          const blob = `${it.summary} ${it.booker} ${it.meetingLink} ${it.manageLink} ${it.meetingTime}`.toLowerCase();
+          return blob.includes(q);
+        });
+      }
+
+      return items;
+    }
+
     function render(items) {
       const groups = groupByDay(items);
 
       if (!groups || groups.size === 0) {
-        root.textContent = "Không có dữ liệu.";
+        root.textContent = showPast
+          ? "Không có dữ liệu phù hợp."
+          : "Không có lịch từ hôm nay trở về sau.";
         return;
       }
 
@@ -142,7 +171,6 @@
         const day = document.createElement("div");
         day.className = "day";
 
-        // tiêu đề theo dd/mm/yyyy
         const h2 = document.createElement("h2");
         h2.textContent = formatDateDDMMYYYY(dayItems[0]._date);
         day.appendChild(h2);
@@ -166,8 +194,6 @@
         for (const it of dayItems) {
           const tr = document.createElement("tr");
 
-          // Hiển thị y chang string từ sheet (nếu có),
-          // nhưng nếu string thiếu/khác format thì normalize theo template dd/mm/yyyy hh:mm AM/PM
           const raw = String(it.meetingTime || "").trim();
           const meetingTimeText = raw ? raw : formatMeetingTimeTemplate(it._date);
 
@@ -187,19 +213,23 @@
       }
     }
 
-    function applyFilter() {
-      const q = (qEl.value || "").trim().toLowerCase();
-      if (!q) return render(itemsAll);
-
-      const filtered = itemsAll.filter(it => {
-        const blob = `${it.summary} ${it.booker} ${it.meetingLink} ${it.manageLink} ${it.meetingTime}`.toLowerCase();
-        return blob.includes(q);
-      });
-      render(filtered);
+    function renderCurrentView() {
+      render(getDisplayItems());
+      togglePastEl.textContent = showPast ? "Ẩn lịch cũ" : "Xem lịch cũ";
     }
 
-    qEl.addEventListener("input", applyFilter);
-    resetEl.addEventListener("click", () => { qEl.value = ""; render(itemsAll); });
+    qEl.addEventListener("input", renderCurrentView);
+
+    resetEl.addEventListener("click", () => {
+      qEl.value = "";
+      showPast = false;
+      renderCurrentView();
+    });
+
+    togglePastEl.addEventListener("click", () => {
+      showPast = !showPast;
+      renderCurrentView();
+    });
 
     function hashItems(items) { return JSON.stringify(items); }
 
@@ -221,7 +251,7 @@
         if (h !== lastHash) {
           lastHash = h;
           itemsAll = items;
-          applyFilter();
+          renderCurrentView();
           statusEl.textContent = "Đã cập nhật ✓";
         } else {
           statusEl.textContent = "Không đổi";
